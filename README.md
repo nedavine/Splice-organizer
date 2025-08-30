@@ -26,3 +26,17 @@ Save `reorganize_samples.py` into your `Splice/Sounds` folder (or anywhere you l
 ### 2. Open Terminal and navigate
 ```bash
 cd /Users/<YourName>/Splice/Sounds
+
+### 4. Run a dry run (no changes, just preview)
+
+python3 ./reorganize_samples.py \
+  --source . \
+  --dest ../Samples_By_Type \
+  --mode symlink \
+  --dry-run
+
+	•	--source . → use the current folder (Splice/Sounds)
+	•	--dest → where to put the reorganized files (here, one folder up: Samples_By_Type)
+	•	--mode symlink → create symbolic links instead of moving or copying
+	•	--dry-run → show what would happen without making changes
+
