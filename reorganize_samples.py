@@ -10,15 +10,16 @@ from pathlib import Path
 AUDIO_EXTS = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".m4a"}
 
 # Keyword rules for categorization. Order matters. First match wins.
+# Note: removed the overly broad "shot" token from the snares rule.
 CATEGORY_RULES = [
     # Drums - one shots
     (("kick", "bd", "subkick"), "Drums/Kicks"),
-    (("snare", "rimshot", "rim", "shot"), "Drums/Snares"),
+    (("snare", "rimshot", "rim shot", "rim_attack", "rim-attack", "rim"), "Drums/Snares"),
     (("clap",), "Drums/Claps"),
-    (("hi hat", "hi-hat", "hihat", "hat"), "Drums/Hats"),
+    (("hi hat", "hi-hat", "hihat", "chh", "ohh", "hat"), "Drums/Hats"),
     (("tom",), "Drums/Toms"),
     (("ride", "crash", "splash", "china", "cymbal"), "Drums/Cymbals"),
-    (("shaker", "tamb", "tambo", "tambourine", "bongo", "conga", "timbale", "cowbell", "clave", "guiro", "agogo", "block"), "Drums/Percussion"),
+    (("shaker", "tamb", "tambo", "tambourine", "bongo", "conga", "timbale", "cowbell", "clave", "guiro", "agogo", "block", "perc", "percussion"), "Drums/Percussion"),
 
     # Drum loops and breaks
     (("break", "breakbeat", "amen", "funky drummer"), "Loops/Drums/Breaks"),
@@ -35,7 +36,7 @@ CATEGORY_RULES = [
     (("pluck",), "Synth/Plucks"),
     (("arpeggio", "arp"), "Synth/Arps"),
     (("synth",), "Synth"),
-    (("piano", "keys", "rhodes", "wurlitzer", "organ", "epiano"), "Keys"),
+    (("piano", "keys", "rhodes", "wurlitzer", "organ", "epiano", "melotron", "mellotron"), "Keys"),
 
     # Guitars and strings
     (("guitar", "gtr"), "Guitar"),
@@ -46,23 +47,42 @@ CATEGORY_RULES = [
     (("flute", "clarinet", "oboe", "bassoon", "woodwind"), "Winds"),
 
     # Vocals
-    (("vocal", "vox", "choir", "chant", "adlib", "ad-lib", "adlib"), "Vocals"),
+    (("vocal", "vox", "choir", "chant", "adlib", "ad-lib"), "Vocals"),
 
     # FX and others
-    (("fx", "sfx", "sweep", "riser", "rise", "downlifter", "downer", "impact", "boom", "whoosh", "glitch", "stutter"), "FX"),
-    (("noise", "texture", "atmo", "ambience", "ambient", "drone", "foley", "field"), "Textures Foley"),
+    (("fx", "sfx", "sweep", "riser", "rise", "downlifter", "downer", "impact", "boom", "whoosh", "glitch", "stutter", "laser", "phone"), "FX"),
+    (("noise", "texture", "textures", "atmo", "ambience", "ambient", "drone", "foley", "field", "field recording", "field_recording", "recording"), "Textures Foley"),
 
-    # Generic loops and one shots if nothing else matched
+    # Generic one shots and loops if nothing else matched
+    (("one shot", "oneshot"), "One Shots/Misc"),
     (("loop",), "Loops/Misc"),
-    (("one shot", "oneshot", "shot"), "One Shots/Misc"),
 ]
+
+# Safer tokenization across common separators
+SEP = r"[ _\-\.\(\)\[\]]"  # separators: space, underscore, dash, dot, parens, brackets
 
 # Simple helpers
 BPM_PAT = re.compile(r"\b(\d{2,3})\s?bpm\b", re.I)
 KEY_PAT = re.compile(r"\b([A-G](?:#|b)?)(?:\s|-|_)?(maj|min|m|minor|major)?\b", re.I)
 
-def norm(s: str) -> str:
-    return s.lower()
+def normalize_for_match(s: str) -> str:
+    s = s.lower()
+    # collapse runs of separators to single spaces
+    s = re.sub(SEP + "+", " ", s)
+    return s
+
+def kw_in(hay: str, kw: str) -> bool:
+    """
+    True if kw appears as a whole token or phrase inside hay,
+    allowing common separators between words.
+    """
+    if " " in kw:
+        # support phrases like "hi hat" that may be written "hi-hat" or "hi_hat"
+        parts = [re.escape(p) for p in kw.split()]
+        pattern = r"\b" + rf"(?:{SEP}+)?".join(parts) + r"\b"
+    else:
+        pattern = r"\b" + re.escape(kw) + r"\b"
+    return re.search(pattern, hay, flags=re.I) is not None
 
 def categorize(path: Path) -> str:
     """
@@ -72,16 +92,16 @@ def categorize(path: Path) -> str:
         path.name,
         *[p.name for p in path.parents if p.name]  # includes pack and subfolders
     ])
-    hay_n = norm(hay)
+    hay_n = normalize_for_match(hay)
 
-    # Try explicit rules
+    # Try explicit rules in order
     for keywords, target in CATEGORY_RULES:
         for kw in keywords:
-            if kw in hay_n:
+            if kw_in(hay_n, kw):
                 return target
 
     # Fallback heuristics
-    if "loop" in hay_n:
+    if kw_in(hay_n, "loop"):
         return "Loops/Misc"
     return "Unsorted"
 
