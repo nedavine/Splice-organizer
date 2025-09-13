@@ -6,20 +6,101 @@ import shutil
 import sys
 from pathlib import Path
 
+import hashlib
+
+MAX_REL_PATH_CHARS = 128
+FILLER_WORDS = {
+    "the","and","with","from","for","of","loop","sample","one-shot","oneshot","onesht","shot",
+    "stereo","mono","wet","dry","mix","ver","take","take1","take2","v1","v2","pack","splice"
+}
+SEPARATORS_RE = re.compile(r"[\s\-\._]+")
+NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9\+\#]")
+VOWELS_RE = re.compile(r"(?i)(?<=.)([aeiouy])(?=.)")
+MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+def _sha7(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:7]
+
+def _collapse(name: str) -> str:
+    name = SEPARATORS_RE.sub("_", name.strip())
+    return MULTI_UNDERSCORE_RE.sub("_", name).strip("_")
+
+def _drop_filler(name: str) -> str:
+    toks = [t for t in name.split("_") if t.lower() not in FILLER_WORDS]
+    return "_".join(toks) or name
+
+def _mid_vowel_strip(name: str) -> str:
+    out = []
+    for t in name.split("_"):
+        out.append(VOWELS_RE.sub("", t))
+    s = "_".join(out)
+    return MULTI_UNDERSCORE_RE.sub("_", s).strip("_")
+
+def _unique(suggested: str, existing: set[str], max_len: int, orig: str) -> str:
+    cand = suggested[:max_len]
+    if cand not in existing:
+        return cand
+    suffix = "~" + _sha7(orig)
+    room = max_len - len(suffix)
+    if room < 1:
+        return suffix[-max_len:]
+    base = cand[:room]
+    final = base + suffix
+    if final in existing:
+        final = (orig[:max(1, room-1)] + suffix)[:max_len]
+    return final
+
+def _shorten_folder(name: str, max_len: int = 18) -> str:
+    n = _mid_vowel_strip(_drop_filler(_collapse(name)))
+    return (n or "x")[:max_len]
+
+def _shorten_stem(stem: str, pack_hint: str | None) -> str:
+    s = _collapse(stem)
+    if pack_hint:
+        ph = _collapse(pack_hint)
+        low = s.lower()
+        if low.startswith(ph.lower() + "_"):
+            s = s[len(ph) + 1:]
+        elif low.startswith(ph.lower()):
+            s = s[len(ph):]
+    s = _mid_vowel_strip(_drop_filler(s))
+    s = NON_ALNUM_RE.sub("_", s)
+    s = MULTI_UNDERSCORE_RE.sub("_", s).strip("_")
+    return s or "x"
+
+def enforce_m8_limit(dst_root: Path, out_path: Path, pack_hint: str | None = None) -> Path:
+    """Return a possibly adjusted out_path so that its relative path length <= 128."""
+    rel = out_path.relative_to(dst_root)
+    if len(str(rel)) <= MAX_REL_PATH_CHARS:
+        return out_path
+
+    parent = out_path.parent
+    parent_rel_len = len(str(parent.relative_to(dst_root)))
+    max_name_len = MAX_REL_PATH_CHARS - parent_rel_len - 1
+
+    stem = _shorten_stem(out_path.stem, pack_hint)
+    ext = out_path.suffix
+    max_stem_len = max(1, max_name_len - len(ext))
+    if len(stem) > max_stem_len:
+        stem = stem[:max_stem_len]
+
+    siblings = {p.name for p in parent.iterdir() if p.is_file()}
+    new_name = _unique(stem + ext, siblings - {out_path.name}, max_name_len, out_path.name)
+    return parent / new_name
+
 # File types to include
 AUDIO_EXTS = {".wav", ".aif", ".aiff", ".flac", ".mp3", ".ogg", ".m4a"}
 
 # Keyword rules for categorization. Order matters. First match wins.
-# Note: removed the overly broad "shot" token from the snares rule.
 CATEGORY_RULES = [
     # Drums - one shots
     (("kick", "bd", "subkick"), "Drums/Kicks"),
-    (("snare", "rimshot", "rim shot", "rim_attack", "rim-attack", "rim"), "Drums/Snares"),
+    (("snare", "rimshot", "rim"), "Drums/Snares"),
     (("clap",), "Drums/Claps"),
-    (("hi hat", "hi-hat", "hihat", "chh", "ohh", "hat"), "Drums/Hats"),
+    (("hi hat", "hi-hat", "hihat", "hat"), "Drums/Hats"),
     (("tom",), "Drums/Toms"),
     (("ride", "crash", "splash", "china", "cymbal"), "Drums/Cymbals"),
-    (("shaker", "tamb", "tambo", "tambourine", "bongo", "conga", "timbale", "cowbell", "clave", "guiro", "agogo", "block", "perc", "percussion"), "Drums/Percussion"),
+    (("shaker", "tamb", "tambo", "tambourine", "bongo", "conga", "timbale", "cowbell", "clave", "guiro", "agogo", "block"), "Drums/Percussion"),
 
     # Drum loops and breaks
     (("break", "breakbeat", "amen", "funky drummer"), "Loops/Drums/Breaks"),
@@ -36,7 +117,7 @@ CATEGORY_RULES = [
     (("pluck",), "Synth/Plucks"),
     (("arpeggio", "arp"), "Synth/Arps"),
     (("synth",), "Synth"),
-    (("piano", "keys", "rhodes", "wurlitzer", "organ", "epiano", "melotron", "mellotron"), "Keys"),
+    (("piano", "keys", "rhodes", "wurlitzer", "organ", "epiano"), "Keys"),
 
     # Guitars and strings
     (("guitar", "gtr"), "Guitar"),
@@ -47,42 +128,23 @@ CATEGORY_RULES = [
     (("flute", "clarinet", "oboe", "bassoon", "woodwind"), "Winds"),
 
     # Vocals
-    (("vocal", "vox", "choir", "chant", "adlib", "ad-lib"), "Vocals"),
+    (("vocal", "vox", "choir", "chant", "adlib", "ad-lib", "adlib"), "Vocals"),
 
     # FX and others
-    (("fx", "sfx", "sweep", "riser", "rise", "downlifter", "downer", "impact", "boom", "whoosh", "glitch", "stutter", "laser", "phone"), "FX"),
-    (("noise", "texture", "textures", "atmo", "ambience", "ambient", "drone", "foley", "field", "field recording", "field_recording", "recording"), "Textures Foley"),
+    (("fx", "sfx", "sweep", "riser", "rise", "downlifter", "downer", "impact", "boom", "whoosh", "glitch", "stutter"), "FX"),
+    (("noise", "texture", "atmo", "ambience", "ambient", "drone", "foley", "field"), "Textures Foley"),
 
-    # Generic one shots and loops if nothing else matched
-    (("one shot", "oneshot"), "One Shots/Misc"),
+    # Generic loops and one shots if nothing else matched
     (("loop",), "Loops/Misc"),
+    (("one shot", "oneshot", "shot"), "One Shots/Misc"),
 ]
-
-# Safer tokenization across common separators
-SEP = r"[ _\-\.\(\)\[\]]"  # separators: space, underscore, dash, dot, parens, brackets
 
 # Simple helpers
 BPM_PAT = re.compile(r"\b(\d{2,3})\s?bpm\b", re.I)
 KEY_PAT = re.compile(r"\b([A-G](?:#|b)?)(?:\s|-|_)?(maj|min|m|minor|major)?\b", re.I)
 
-def normalize_for_match(s: str) -> str:
-    s = s.lower()
-    # collapse runs of separators to single spaces
-    s = re.sub(SEP + "+", " ", s)
-    return s
-
-def kw_in(hay: str, kw: str) -> bool:
-    """
-    True if kw appears as a whole token or phrase inside hay,
-    allowing common separators between words.
-    """
-    if " " in kw:
-        # support phrases like "hi hat" that may be written "hi-hat" or "hi_hat"
-        parts = [re.escape(p) for p in kw.split()]
-        pattern = r"\b" + rf"(?:{SEP}+)?".join(parts) + r"\b"
-    else:
-        pattern = r"\b" + re.escape(kw) + r"\b"
-    return re.search(pattern, hay, flags=re.I) is not None
+def norm(s: str) -> str:
+    return s.lower()
 
 def categorize(path: Path) -> str:
     """
@@ -92,32 +154,40 @@ def categorize(path: Path) -> str:
         path.name,
         *[p.name for p in path.parents if p.name]  # includes pack and subfolders
     ])
-    hay_n = normalize_for_match(hay)
+    hay_n = norm(hay)
 
-    # Try explicit rules in order
+    # Try explicit rules
     for keywords, target in CATEGORY_RULES:
         for kw in keywords:
-            if kw_in(hay_n, kw):
+            if kw in hay_n:
                 return target
 
     # Fallback heuristics
-    if kw_in(hay_n, "loop"):
+    if "loop" in hay_n:
         return "Loops/Misc"
     return "Unsorted"
 
-def safe_write(src: Path, dest: Path, mode: str) -> Path:
+def safe_write(src: Path, dest: Path, mode: str, dst_root: Path, enforce_limit: bool = True, pack_hint: str | None = None) -> Path:
     """
     Place file at dest using mode: move, copy, symlink.
-    If name collision occurs, append a counter.
-    Symlink fallback strategy: try symlink, then hardlink, then copy.
+    Enforce M8 128-char relative path limit and ensure uniqueness without exceeding it.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    final = dest
+
+    # Optionally enforce the 128-char limit for the target filename before checking collisions
+    if enforce_limit:
+        dest = enforce_m8_limit(dst_root, dest, pack_hint)
+
+    # Ensure uniqueness among siblings without creating names that would exceed the limit
+    siblings = {p.name for p in dest.parent.iterdir() if p.is_file()}
+    # Compute the max filename length allowed given the parent relative path length
+    parent_rel_len = len(str(dest.parent.relative_to(dst_root)))
+    max_name_len = MAX_REL_PATH_CHARS - parent_rel_len - 1
+
     stem, ext = dest.stem, dest.suffix
-    i = 1
-    while final.exists():
-        final = dest.with_name(f"{stem} ({i}){ext}")
-        i += 1
+    # Use the _unique helper to avoid collisions while respecting max_name_len
+    final_name = _unique(stem + ext, siblings, max_name_len, dest.name)
+    final = dest.parent / final_name
 
     if mode == "move":
         shutil.move(str(src), str(final))
@@ -182,13 +252,17 @@ def main():
 
         m_key = KEY_PAT.search(f.name)
         if m_key:
-            base = m_key.group(1).upper().replace("B", "b").replace("#", "#")
-            qual = m_key.group(2) or ""
-            # Normalize minor markers
-            if qual.lower() in {"m", "min", "minor"}:
+            # Keep letter uppercase, preserve sharps, and render flats with lowercase 'b' suffix
+            raw = m_key.group(1)
+            letter = raw[0].upper()
+            accidental = raw[1:] if len(raw) > 1 else ""
+            if accidental in {"#", "b"}:
+                base = f"{letter}{accidental}"
+            else:
+                base = letter
+            qual = (m_key.group(2) or "").lower()
+            if qual in {"m", "min", "minor"}:
                 key = f"{base}m"
-            elif qual.lower() in {"maj", "major"}:
-                key = f"{base}"
             else:
                 key = base
 
@@ -199,6 +273,13 @@ def main():
             tags.append(key)
         tag_str = f" [{' '.join(tags)}]" if tags else ""
 
+        # Derive pack/vendor from the source path under src_root for better filename shortening
+        try:
+            rel_from_src = f.relative_to(src_root)
+            pack_hint = rel_from_src.parts[0] if len(rel_from_src.parts) > 1 else None
+        except Exception:
+            pack_hint = None
+
         rel_name = f"{name}{tag_str}{suffix}"
         out_path = dst_root / cat / rel_name
 
@@ -206,7 +287,7 @@ def main():
             if not args.quiet:
                 print(f"{f}  ->  {out_path}  [{args.mode}]")
         else:
-            final_path = safe_write(f, out_path, args.mode)
+            final_path = safe_write(f, out_path, args.mode, dst_root, True, pack_hint)
             if not args.quiet:
                 print(f"Placed: {final_path}")
         moved += 1
